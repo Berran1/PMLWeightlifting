@@ -1,0 +1,124 @@
+---
+title: "Machine Learning - Weightlifting"
+output: html_document
+---
+## Summary
+
+We aimed to use machine learning on a body sensor dataset, to develop an algorithm to evaluate not just whether a person is doing an activity (in this case, a bicep curl weightlifting exercise), but whether they are doing it well. 
+The model used, a random forest model reliant on a base set of 52 variables with sufficient data and non-near-zer-variance, had an in-sample accuracy of over 99% for predicting class of exercise, and this was confirmed in validation with a held-out sample.
+The test set predictions were also confirmed as correct.
+
+We conclude that activity monitor data have the potential to be used to train a model to predict activity quality, with high accuracy. 
+
+
+## Methodology
+
+### Data Set-up
+
+The dataset is based on the WLE dataset from Velloso and collaborators - more information can be found [here](http://groupware.les.inf.puc-rio.br/har#weight_lifting_exercises). 
+It consists of sensor readings such as acceleration, from sensors attached to parts of the exerciser's body and to the dumbbell, while they were doing bicep curls correctly and with common errors. Six subjects were included. 
+
+The data were pre-split into a training set and a test set, consisting of 19,622 observations and 20 observations, respectively, for the six subjects performing 5 classes of dumbbell lift (correct, A, and four incorrect options, B to E, in the `classe` variable). 
+
+For validation purposes I split the training data into a training subset and a hold-out validation subset, in a 70:30 ratio, using the `createDataPartition` function from the *caret* package in R. 
+```{r, echo=FALSE, message=FALSE}
+library(caret)
+library(randomForest)
+library(knitr)
+```
+```{r, cache=TRUE}
+TrainWLE <- read.csv("weightTraining.csv")
+TestWLE <- read.csv("weightTesting.csv")
+set.seed(4443)
+inTrain <- createDataPartition(y=TrainWLE$classe, p=0.7, list=F)
+TrainWLEt <- TrainWLE[inTrain,]
+TrainWLEv <- TrainWLE[-inTrain,]
+```
+
+### Model Selection
+
+The planned approach uses a **random forest** model. 
+This model was selected as suitable for dealing with a large initial number of variables with complex relations (likely non-linear), with fast processing time, and giving interpretable results. It also has the advantage that cross-validation, as "out-of-bag" error, occurs internally as part of the process. 
+
+### Data Pre-processing
+
+#### Missing Values
+
+Inspection of the training dataset suggests that the vast majority of observations (>90%) have missing values, and that these values are specific to certain variables. Given the low number of complete cases, imputation is likely to produce poor data in this case, and these features with most data missing are assumed to have low predictive value as a practical matter, and therefore are removed from the dataset.
+```{r, cache=TRUE}
+f1 <- function(x) sum(is.na(x))
+ColNA <- sapply(TrainWLEt, f1)
+cutNATrainWLEt <- TrainWLEt[,ColNA==0]
+## Do the same for the validation set and the testing set
+cutNATrainWLEv <- TrainWLEv[,ColNA==0]
+cutNATestWLE <- TestWLE[,ColNA==0]
+```
+
+#### Near Zero variables
+
+The random forest model is relationship-based and therefore shouldn't change with standardisation of variables, so we have not done this. 
+However, it can help to simplify our model to remove variables that have zero or near-zero variance (nearly all the same value), as these are usually unhelpful in prediction and can skew results in some tree selections. The `nearZeroVar` function is used for this, applied to training set and then to validation and test set. 
+```{r, cache=TRUE}
+nzv <- nearZeroVar(cutNATrainWLEt)
+filtercutNATrainWLEt <- cutNATrainWLEt[,-nzv]
+filtercutNATrainWLEv <- cutNATrainWLEv[,-nzv]
+filtercutNATestWLE <- cutNATestWLE[,-nzv]
+```
+
+#### Removing Definition variables
+
+Finally, before running our model we need to remove variables that are not usefully predictive. For example, the observation order (first column) is strongly predictive of the activity because of the order in which they were done by each participant, but this does not help build a predictor for future activities. Likewise, the variables relating to time are not useful. (NB: Given the dynamic nature of weightlifting it is likely that a stronger predictive technique for these data would be to use time slices of multiple sensor observations, as was done by the original authors. Unfortunately, our test set consists of 20 observations total, at random times, and so this is not possible in the current work.)
+Finally, the decision was made to remove the participant ID (`user_name`) from the feature set. The reason for this is that we wished to build a robust model independent of the weightlifter. While it is likely that a model trained to an individual exerciser will outperform a general model for that user, that doesn't really help a new weightlifter starting out and wanting to have good technique from the start, so the decision was made to predict exercise quality by sensor readings alone.
+
+```{r cache=TRUE}
+predictorCols <- filtercutNATrainWLEt[,-c(1:6)]
+```
+This leaves 52 predictors for the exercise class, `classe`. 
+
+## Modelling
+
+In order to speed up processing time, the number of resampling iterations was set at 4. 
+The method for resampling was set to out-of-bag (`oob`). 
+
+```{r, cache=TRUE}
+set.seed(5554)
+wleControl <- trainControl(method="oob", number=4)
+modFit <- train(classe~., data=predictorCols, method="rf", trControl = wleControl)
+```
+This produces a model with an OOB estimate of the error rate, in the test sample, of 0.69%. 
+The Confusion Matrix shows that the highest class error is associated with weightlifting class D (lowering halfway).
+```{r}
+kable(modFit$finalModel[[5]]) # should give confusion Matrix but may only appear in html not markdown
+```
+The important predictors are shown in Figure 1, where higher decrease in the Gini value shows greater impact on model accuracy. 
+It is clear that different measurements from the participant's waist (belt sensor), the dumbbell itself, and the forearm/arm, are all involved in defining the activity quality. 
+```{r}
+varImpPlot(modFit$finalModel, n.var=15, main="Fig. 1: Relative Variable Importance", cex=0.8, pch=19, col="red")
+```
+
+And the way the class interacts with the top two most influential features can be shown. 
+```{r}
+qplot(predictorCols$roll_belt, predictorCols$yaw_belt, colour=classe, data=predictorCols)
+```
+There is separation between activities, with the greatest impact on activity E - this is consistent with expectations, as that "bad" way of doing the exercise involved hip movement, which is expected to show up on belt sensor measurements. As expected the separation between activities based on just these 2 (of 52) variables is unclear. 
+
+#### Testing the Model
+
+We can now use our holdout validation set to investigate the error in prediction for a different dataset. This produces a confusion Matrix. 
+```{r}
+pred <- predict(modFit, newdata=filtercutNATrainWLEv)
+kable(confusionMatrix(pred, filtercutNATrainWLEv$classe)[[2]])
+```
+The accuracy is estimated at `r confusionMatrix(pred, filtercutNATrainWLEv$classe)[[3]][1]` - less than 1% error. This is roughly the same as the training data set, showing the robustness of this approach. 
+
+Finally, the same model can be applied to the test data set of 20 observations (a separate assessment piece).
+
+```{r, echo=FALSE}
+predTest <- predict(modFit, newdata=filtercutNATestWLE)
+```
+
+For real-world use with user feedback it would be possible to reapply the random forest model using a more limited set of variables identified as important (or using summary variables) to speed up calculations, if necessary. 
+
+## Conclusion
+
+The random forest model fitted to the training data subset can separate activity quality on the basis of activity monitor data, for training data and with predictive value for new data. 
